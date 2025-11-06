@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # 1. Веб-сервер Nginx
+  nginx:
+    image: nginx:1.19-alpine
+    container_name: loan_api_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./app:/app
+      - ./app/docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - php-fpm
+    networks:
+      - app-network
+
+  # 2. PHP-FPM (Приложение Yii2)
+  php-fpm:
+    build:
+      context: ./app
+      args:
+        - YII_ENV=${YII_ENV}
+    container_name: loan_api_app
+    volumes:
+      - ./app:/app
+    depends_on:
+      db:
+        # ❗️ ИЗМЕНЕНИЕ: Ждем, пока DB не станет "healthy"
+        condition: service_healthy
+    networks:
+      - app-network
+    environment:
+      - YII_ENV=${YII_ENV} # Переменная будет доступна для php-fpm
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      bash -c "
+         chown -R www-data:www-data /app/runtime /app/web/assets;
+         echo 'Waiting for DB... running migrations...';
+      
+         # Используем $$YII_ENV, чтобы bash внутри контейнера
+         # прочитал переменную окружения, а не Docker Compose.
+         if [ \"$$YII_ENV\" = \"dev\" ]; then
+           echo 'Running in DEV mode, disabling Xdebug for migrations.';
+           php -d xdebug.mode=off /app/yii migrate --interactive=0;
+         else
+           echo 'Running in PROD/TEST mode, Xdebug not active.';
+           php /app/yii migrate --interactive=0;
+         fi;
+      
+         echo 'Migrations complete. Starting PHP-FPM...';
+         php-fpm
+       "
+
+  # 3. База данных PostgreSQL
+  db:
+    image: postgres:13-alpine
+    container_name: loan_api_db
+    restart: always
+    environment:
+      POSTGRES_DB: ${loans}
+      POSTGRES_USER: ${user}
+      POSTGRES_PASSWORD: ${password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    # ❗️ ИЗМЕНЕНИЕ: Добавлена проверка, что PG готов
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d loans"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
