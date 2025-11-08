@@ -2,6 +2,7 @@ services:
   nginx:
     image: nginx:1.19-alpine
     container_name: loan_api_nginx
+    restart: always
     ports:
       - "80:80"
     volumes:
@@ -18,12 +19,12 @@ services:
       args:
         - YII_ENV=${YII_ENV}
     container_name: loan_api_app
+    restart: always
     volumes:
       - ./app:/app
       - ./.env:/app/.env
     environment:
       - YII_ENV=${YII_ENV}
-      # Лимит времени выполнения скриптов 5 минут
       - PHP_MAX_EXECUTION_TIME=300
     depends_on:
       db:

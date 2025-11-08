@@ -1,0 +1,8 @@
+POST http://localhost/requests
+Content-Type: application/json
+
+{
+  "user_id":5,
+  "amount":1,
+  "term":10
+}
