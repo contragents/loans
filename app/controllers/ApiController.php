@@ -2,9 +2,17 @@
 
 namespace app\controllers;
 
+use app\models\Request;
+use app\models\RequestInput;
+use TheSeer\Tokenizer\Exception;
 use Yii;
+use yii\db\Expression;
+use yii\db\Query;
+use yii\db\Transaction;
 use yii\rest\Controller;
+use yii\web\ForbiddenHttpException;
 use yii\web\Response;
+
 //use app\models\LoanRequest;
 
 class ApiController extends Controller
@@ -27,111 +35,146 @@ class ApiController extends Controller
         return $behaviors;
     }
 
-    /**
-     * @inheritdoc
-     */
-    public function beforeAction($action)
+    public function actionForbidden()
     {
-        return parent::beforeAction($action);
+        Yii::$app->response->statusCode = 403;
+
+        return ['result' => 'Forbidden'];
     }
 
     /**
      * Эндпоинт: POST /requests
      * Подача новой заявки на займ.
+     * @return array ['result' => true, 'id' => <new_request_id>] если заявка пользователя принятв, ['result' => false] в случае ошибки
      */
-    public function actionRequests()
+    public function actionRequests(): array
     {
-        return ['result' => false];
+        try {
+            $postData = json_decode(Yii::$app->request->getRawBody(), true);
 
-        $model = new LoanRequest();
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new \Exception('Got JSON encoding error: ' . json_last_error());
+            }
 
-        // Загружаем данные из POST-запроса (без имени модели)
-        $model->load(Yii::$app->request->post(), '');
+            $modelInput = new RequestInput();
+            $modelInput->load($postData, '');
 
-        if ($model->validate()) {
-            // Статус 'pending' устанавливается по умолчанию (см. rules)
-            if ($model->save(false)) { // Сохраняем без повторной валидации
-                Yii::$app->response->statusCode = 201; // Created
-                return ['result' => true, 'id' => $model->id];
+            if ($modelInput->validate()) {
+                $model = new Request();
+
+                // Копируем только безопасные, уже валидированные атрибуты из RequestInput
+                $model->user_id = $modelInput->user_id;
+                $model->amount = $modelInput->amount;
+                $model->term = $modelInput->term;
+                // Статус 'pending' устанавливается по умолчанию (см. Request::rules)
+
+                // Сохраняем с повторной валидацией для проверки, что нет одобренных заявок данному user_id
+                if ($model->save(true)) {
+                    Yii::$app->response->statusCode = 201; // Created
+
+                    return ['result' => true, 'id' => $model->id];
+                } else {
+                    throw new \Exception('Model validation errors: ' . print_r($model->getErrors(), true));
+                }
+            } else {
+                throw new \Exception('Input validation errors: ' . print_r($modelInput->getErrors(), true));
+            }
+        } catch (\Throwable $e) {
+            // Отдаем текст исключения и ошибки валидации, если DEV
+            if (YII_ENV_DEV) {
+                Yii::$app->response->statusCode = 500;
+
+                return ['result' => false, 'errors' => $e->__toString(), 'env' => ['YII_ENV_PROD' => YII_ENV_PROD, 'YII_ENV' => YII_ENV, '$_ENV[YII_ENV]' => $_ENV['YII_ENV']]];
             }
         }
 
-        // Если валидация не пройдена
-        Yii::$app->response->statusCode = 400; // Bad Request
+        // Если валидация не пройдена или возникли исключения, возвращаем HTTP-статус Bad Request
+        Yii::$app->response->statusCode = 400;
+
         return ['result' => false];
     }
 
     /**
      * Эндпоинт: GET /processor
      * Запуск обработки заявок.
-     * @param int $delay Время задержки в секундах.
+     * @param int $delay
+     * @return array ['result' => true] если обработка прошла без ошибок, ['result' => false] в случае ошибки
      */
-public function actionProcessor($delay = 5)
-{
-    return ['result' => false];
-
-    $delay = (int)$delay;
-    if ($delay < 0) {
-        $delay = 0;
-    }
-
-    // Обрабатываем заявки в цикле, пока есть "pending"
-    while (true) {
-        $transaction = Yii::$app->db->beginTransaction(\yii\db\Transaction::READ_COMMITTED);
-
-        try {
-            // 1. Находим и блокируем ОДНУ заявку
-            // "FOR UPDATE SKIP LOCKED" — ключ к параллельной обработке.
-            // Несколько запущенных /processor не схватят одну и ту же запись.
-            $request = LoanRequest::findBySql(
-                "SELECT * FROM loan_requests WHERE status = :status ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                [':status' => LoanRequest::STATUS_PENDING]
-            )->one();
-
-            // Если заявок не найдено, выходим из цикла
-            if ($request === null) {
-                $transaction->commit();
-                break;
-            }
-
-            // 2. Эмулируем долгую обработку
-            sleep($delay);
-
-            // 3. Принимаем решение (10% шанс аппрува)
-            $decision = LoanRequest::STATUS_DECLINED;
-            $approveChance = rand(1, 100);
-
-            if ($approveChance <= 10) {
-                // 4. Проверяем доп. условие: нет ли уже одобренных у этого юзера
-                // Эта проверка критична, т.к. заявки могут обрабатываться параллельно
-                $hasApproved = LoanRequest::find()
-                    ->where([
-                                'user_id' => $request->user_id,
-                                'status' => LoanRequest::STATUS_APPROVED
-                            ])
-                    ->exists();
-
-                if (!$hasApproved) {
-                    $decision = LoanRequest::STATUS_APPROVED;
-                }
-            }
-
-            // 5. Сохраняем решение
-            $request->status = $decision;
-            $request->save(false); // Валидация не нужна
-
-            // 6. Коммитим транзакцию, освобождая лок
-            $transaction->commit();
-
-        } catch (\Exception $e) {
-            // В случае ошибки откатываем транзакцию
-            $transaction->rollBack();
-            Yii::error($e->getMessage(), 'processor');
-            // Прерываем выполнение, чтобы не уйти в бесконечный цикл
-            return ['result' => false, 'error' => 'Processing failed'];
+    public function actionProcessor($delay = 5): array
+    {
+        $delayInt = (int)$delay;
+        if ($delayInt < 0) {
+            $delayInt = 0;
         }
-    }
 
-    return ['result' => true];
-}
+        // Обрабатываем заявки в цикле, пока есть "pending"
+        while (true) {
+            try {
+                // 1. Находим ОДНУ заявку, которая принадлежит пользователю НЕ в статусе approved или processing
+                $subQuery = (new Query())
+                    ->select(['user_id'])
+                    ->from(Request::tableName())
+                    ->where(['status' => [Request::STATUS_APPROVED, Request::STATUS_PROCESSING]]);
+
+                $requestModel = Request::find()
+                    ->where(
+                        [
+                            'and',
+                            ['status' => Request::STATUS_PENDING],
+                            [
+                                'NOT IN',
+                                'user_id',
+                                $subQuery
+                            ]
+                        ]
+                    )
+                    ->one();
+
+                // Если заявок не найдено, выходим из цикла
+                if ($requestModel === null) {
+                    break;
+                }
+
+                // 2. Атомарно блокируем найденную заявку, проверяя, что данный пользователь еще не ушел в статус approved или processing
+                $lockedCount = Yii::$app->db->createCommand()
+                    ->update(
+                        Request::tableName(),
+                        ['status' => Request::STATUS_PROCESSING],
+                        [
+                            'and',
+                            ['id' => $requestModel->id],
+                            [
+                                'NOT IN',
+                                'user_id',
+                                $subQuery
+                            ],
+                        ]
+                    )
+                    ->execute();
+
+                // Если заявка не залочена (параллельный процесс успел залочить заявку данного юзера), продолжаем цикл
+                if (!$lockedCount) {
+                    continue;
+                }
+
+                // 3. Эмулируем долгую обработку
+                sleep($delayInt);
+
+                // 3. Принимаем решение (10% шанс аппрува)
+                $decision = rand(1, 100) > 10 ? Request::STATUS_DECLINED : Request::STATUS_APPROVED;
+
+                // 4. Сохраняем решение
+                $requestModel->status = $decision;
+                $requestModel->save(false); // Валидация не нужна - мы исключили конкурирующие блокировки user_id
+            } catch (\Exception $e) {
+                // Прерываем выполнение, чтобы не уйти в бесконечный цикл
+                return ['result' => false]
+                    + (YII_ENV_DEV
+                        ? ['errors' => $e->__toString()]
+                        : []);
+            }
+        }
+
+        return ['result' => true];
+    }
 }

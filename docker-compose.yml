@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # 1. Веб-сервер Nginx
   nginx:
     image: nginx:1.19-alpine
     container_name: loan_api_nginx
@@ -9,68 +6,77 @@ services:
       - "80:80"
     volumes:
       - ./app:/app
-      - ./app/docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - php-fpm
     networks:
       - app-network
 
-  # 2. PHP-FPM (Приложение Yii2)
   php-fpm:
     build:
-      context: ./app
+      context: ./docker
       args:
         - YII_ENV=${YII_ENV}
     container_name: loan_api_app
     volumes:
       - ./app:/app
+      - ./.env:/app/.env
+    environment:
+      - YII_ENV=${YII_ENV}
+      # Лимит времени выполнения скриптов 5 минут
+      - PHP_MAX_EXECUTION_TIME=300
     depends_on:
       db:
-        # ❗️ ИЗМЕНЕНИЕ: Ждем, пока DB не станет "healthy"
         condition: service_healthy
     networks:
       - app-network
-    environment:
-      - YII_ENV=${YII_ENV} # Переменная будет доступна для php-fpm
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: >
-      bash -c "
-         chown -R www-data:www-data /app/runtime /app/web/assets;
-         echo 'Waiting for DB... running migrations...';
-      
-         # Используем $$YII_ENV, чтобы bash внутри контейнера
-         # прочитал переменную окружения, а не Docker Compose.
-         if [ \"$$YII_ENV\" = \"dev\" ]; then
-           echo 'Running in DEV mode, disabling Xdebug for migrations.';
-           php -d xdebug.mode=off /app/yii migrate --interactive=0;
-         else
-           echo 'Running in PROD/TEST mode, Xdebug not active.';
-           php /app/yii migrate --interactive=0;
-         fi;
-      
-         echo 'Migrations complete. Starting PHP-FPM...';
-         php-fpm
-       "
+    # Указываем entrypoint, отключая скрипт образа
+    entrypoint: /bin/bash
+    # Передаем 'command:' как аргумент для /bin/bash
+    # Используем формат списка и YAML-блок '|' для чистоты
+    command:
+      - "-c"
+      - |
+        echo '>>> (1/6) Script started.';
+        echo '>>> (2/6) Running composer install...';
 
-  # 3. База данных PostgreSQL
+        if [ "$$YII_ENV" = "dev" ]; then
+          php -d memory_limit=-1 -d xdebug.mode=off /usr/local/bin/composer.phar install -v --no-interaction --prefer-dist --optimize-autoloader;
+        else
+          php -d memory_limit=-1 /usr/local/bin/composer.phar install -v --no-interaction --prefer-dist --optimize-autoloader --no-dev;
+        fi;
+
+        echo '>>> (3/6) Composer install finished.'
+
+        echo '>>> (4/6) Setting up permissions for runtime/assets...';
+        chown -R www-data:www-data /app/runtime /app/web/assets;
+        echo '>>> (5/6) Permissions set.'
+
+        echo '>>> (6/6) Running migrations...';
+        php -d xdebug.mode=off /app/yii migrate --interactive=0;
+
+        echo '>>> Migrations complete. Starting PHP-FPM...';
+        exec php-fpm
+        "
+
   db:
     image: postgres:13-alpine
     container_name: loan_api_db
     restart: always
     environment:
-      POSTGRES_DB: ${loans}
-      POSTGRES_USER: ${user}
-      POSTGRES_PASSWORD: ${password}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app-network
-    # ❗️ ИЗМЕНЕНИЕ: Добавлена проверка, что PG готов
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d loans"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d loans"]
       interval: 5s
       timeout: 5s
       retries: 5
