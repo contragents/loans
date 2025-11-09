@@ -5,4 +5,3 @@ protected/runtime/*
 protected/data/*.db
 themes/classic/views/
 /app/runtime/
-.env
