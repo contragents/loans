@@ -23,6 +23,8 @@ services:
     volumes:
       - ./app:/app
       - ./.env:/app/.env
+      - app_runtime:/app/runtime
+      - app_web_assets:/app/web/assets
     environment:
       - YII_ENV=${YII_ENV}
       - PHP_MAX_EXECUTION_TIME=300
@@ -88,3 +90,5 @@ networks:
 
 volumes:
   postgres_data:
+  app_runtime:
+  app_web_assets:
