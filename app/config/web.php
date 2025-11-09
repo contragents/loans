@@ -67,6 +67,10 @@ if (YII_ENV_DEV) {
     $config['modules']['gii'] = [
         'class' => 'yii\gii\Module',
     ];
+} else {
+    // configuration adjustments for other ('prod', 'test'...) environment
+    ini_set('display_errors', '0');
+    ini_set('display_startup_errors', '0');
 }
 
 return $config;
